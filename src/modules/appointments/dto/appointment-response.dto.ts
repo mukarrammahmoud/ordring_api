@@ -1,5 +1,4 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { AppointmentStatus } from '@prisma/client';
 
 export class AppointmentResponseDto {
   @ApiProperty({ example: 'clx1xyz789' })
@@ -14,8 +13,8 @@ export class AppointmentResponseDto {
   @ApiProperty({ example: 'alice@example.com' })
   clientEmail: string;
 
-  @ApiProperty({ enum: AppointmentStatus, example: AppointmentStatus.CONFIRMED })
-  status: AppointmentStatus;
+  @ApiProperty({ enum: ['CONFIRMED', 'CANCELLED'], example: 'CONFIRMED' })
+  status: 'CONFIRMED' | 'CANCELLED';
 
   @ApiProperty({ example: '2026-10-01T00:00:00.000Z' })
   createdAt: Date;

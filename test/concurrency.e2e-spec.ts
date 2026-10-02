@@ -5,19 +5,23 @@
  * Asserts exactly ONE succeeds (201) and all others receive 409 Conflict.
  * Verifies database has exactly one appointment for the slot.
  *
- * Requires a running database (use docker-compose up -d) and a migrated schema.
+ * Requires a running database (use docker-compose up -d) and migrated schema.
  * Set DATABASE_URL in .env before running.
  */
 
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { PrismaClient } from '@prisma/client';
+import { eq } from 'drizzle-orm';
+import { drizzle, PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import supertest from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module.js';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter.js';
+import * as schema from '../src/db/schema.js';
 
-const prisma = new PrismaClient();
+const client = postgres(process.env.DATABASE_URL ?? '');
+const db: PostgresJsDatabase<typeof schema> = drizzle(client, { schema });
 
 describe('Concurrency: double-booking prevention', () => {
   let app: INestApplication;
@@ -38,21 +42,26 @@ describe('Concurrency: double-booking prevention', () => {
 
   afterAll(async () => {
     await app.close();
-    await prisma.$disconnect();
+    await client.end();
   });
 
   beforeEach(async () => {
     // Clean and seed a single available slot
-    await prisma.appointment.deleteMany();
-    await prisma.slot.deleteMany();
+    await db.delete(schema.appointments);
+    await db.delete(schema.slots);
 
-    const slot = await prisma.slot.create({
-      data: {
+    const [slot] = await db
+      .insert(schema.slots)
+      .values({
+        id: crypto.randomUUID(),
         startTime: new Date('2099-01-01T09:00:00Z'),
         endTime: new Date('2099-01-01T10:00:00Z'),
         isBooked: false,
-      },
-    });
+        version: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .returning();
     slotId = slot.id;
   });
 
@@ -79,12 +88,18 @@ describe('Concurrency: double-booking prevention', () => {
     expect(conflicted).toHaveLength(CONCURRENCY - 1);
 
     // Database must have exactly one appointment
-    const appointmentCount = await prisma.appointment.count({ where: { slotId } });
-    expect(appointmentCount).toBe(1);
+    const appts = await db
+      .select()
+      .from(schema.appointments)
+      .where(eq(schema.appointments.slotId, slotId));
+    expect(appts).toHaveLength(1);
 
     // The slot must be marked as booked
-    const slot = await prisma.slot.findUnique({ where: { id: slotId } });
-    expect(slot?.isBooked).toBe(true);
+    const [slot] = await db
+      .select()
+      .from(schema.slots)
+      .where(eq(schema.slots.id, slotId));
+    expect(slot.isBooked).toBe(true);
   });
 
   it('returns 409 on a second sequential booking attempt for the same slot', async () => {
@@ -123,8 +138,11 @@ describe('Concurrency: double-booking prevention', () => {
     expect(cancelRes.body.status).toBe('CANCELLED');
 
     // Slot should now be free
-    const slot = await prisma.slot.findUnique({ where: { id: slotId } });
-    expect(slot?.isBooked).toBe(false);
+    const [slot] = await db
+      .select()
+      .from(schema.slots)
+      .where(eq(schema.slots.id, slotId));
+    expect(slot.isBooked).toBe(false);
 
     // Re-book the now-free slot
     const rebook = await supertest(app.getHttpServer())
